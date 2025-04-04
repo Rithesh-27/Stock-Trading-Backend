@@ -39,63 +39,61 @@ class RealTimeTradingBot:
         return np.append(prices, [self.balance, self.investment_fund])
 
     def allocate_funds(self, stock_prices):
-        """Allocates funds across selected stocks using the trained model."""
+        """Allocates funds using the trained model and buys integer shares."""
         obs = self.get_observation(stock_prices)[:6]
         action, _ = self.allocation_model.predict(obs, deterministic=True)
 
-        action = np.clip(action, 0, 1)  # Ensure values are between 0 and 1
-        action /= np.sum(action)  # Normalize to sum to 1
+        action = np.clip(action, 0, 1)
+        if np.sum(action) == 0:
+            print("⚠️ Model returned zero allocation, skipping allocation.")
+            return
+        action /= np.sum(action)
 
-        allocation_amount = self.balance * action  # Divide balance among stocks
-        allocation_results = {}
+        buffer_cash = 0.05 * self.balance  # Keep 5% as buffer
+        available_cash = self.balance - buffer_cash
+        allocation_amount = available_cash * action
 
         print("\n📊 Morning Allocation Analysis:")
-
         for i, stock in enumerate(self.stocks):
-            shares_bought = allocation_amount[i] / stock_prices[stock]  # Calculate shares bought
-            self.holdings[stock] += shares_bought
-            self.balance -= allocation_amount[i]
-            allocation_results[stock] = shares_bought
-
-            print(f"  ✅ Bought {shares_bought:.4f} shares of {stock} at ${stock_prices[stock]:.2f} each "
-                  f"→ Spent ${allocation_amount[i]:.2f}")
+            max_shares = int(allocation_amount[i] // stock_prices[stock])
+            cost = max_shares * stock_prices[stock]
+            if max_shares > 0 and self.balance >= cost:
+                self.holdings[stock] += max_shares
+                self.balance -= cost
+                print(f"  ✅ Bought {max_shares} shares of {stock} at ${stock_prices[stock]:.2f} → Spent ${cost:.2f}")
+            else:
+                print(f"  ❌ Skipped {stock}, insufficient funds or zero shares.")
 
         print(f"\n💰 Remaining Cash Balance: ${self.balance:.2f}")
 
     def trade(self, stock_prices):
-        """Checks buy/sell signals at market close and executes trades."""
+        """Executes trades based on PPO signals, only whole shares."""
         obs = self.get_observation(stock_prices)[:6]
         trade_signals, _ = self.signal_model.predict(obs, deterministic=True)
-        
-        trade_results = {}
 
         print("\n📉 Evening Trading Signal Analysis:")
-
         for i, stock in enumerate(self.stocks):
-            morning_shares = self.holdings.get(stock, 0.0)
-            signal_value = trade_signals[i]
+            signal = trade_signals[i]
+            current_price = stock_prices[stock]
 
-            if signal_value < 0:  # Sell signal
-                shares_to_sell = abs(signal_value) * morning_shares
-                sell_value = shares_to_sell * stock_prices[stock]
-                self.balance += sell_value
-                self.holdings[stock] -= shares_to_sell
-                self.investment_fund += sell_value  # Store profit for reinvestment
-                trade_results[stock] = -shares_to_sell
+            if signal < 0:  # Sell
+                shares_to_sell = int(abs(signal) * self.holdings[stock])
+                if shares_to_sell > 0:
+                    proceeds = shares_to_sell * current_price
+                    self.holdings[stock] -= shares_to_sell
+                    self.balance += proceeds
+                    self.investment_fund += proceeds
+                    print(f"  🔻 Sold {shares_to_sell} shares of {stock} at ${current_price:.2f} → Gained ${proceeds:.2f}")
+                else:
+                    print(f"  ⚠️ No shares to sell for {stock}")
 
-                print(f"  🔻 Sold {shares_to_sell:.4f} shares of {stock} at ${stock_prices[stock]:.2f} each "
-                      f"→ Earned ${sell_value:.2f}")
-
-            elif signal_value > 0:  # Buy signal (if enough funds)
-                shares_to_buy = signal_value * (self.balance / stock_prices[stock])
-                buy_value = shares_to_buy * stock_prices[stock]
-                if self.balance >= buy_value:
-                    self.balance -= buy_value
-                    self.holdings[stock] += shares_to_buy
-                    trade_results[stock] = shares_to_buy
-
-                    print(f"  🔺 Bought {shares_to_buy:.4f} shares of {stock} at ${stock_prices[stock]:.2f} each "
-                          f"→ Spent ${buy_value:.2f}")
+            elif signal > 0:  # Buy
+                max_affordable = int((signal * self.balance) // current_price)
+                cost = max_affordable * current_price
+                if max_affordable > 0 and self.balance >= cost:
+                    self.holdings[stock] += max_affordable
+                    self.balance -= cost
+                    print(f"  🔺 Bought {max_affordable} shares of {stock} at ${current_price:.2f} → Spent ${cost:.2f}")
                 else:
                     print(f"  ❌ Not enough balance to buy {stock}")
 
@@ -104,6 +102,7 @@ class RealTimeTradingBot:
 
         print(f"\n💰 Updated Cash Balance: ${self.balance:.2f}")
         print(f"🏦 Investment Fund (Profits for Reinvestment): ${self.investment_fund:.2f}")
+
 
     def run(self):
         """Runs the trading bot every trading day."""
